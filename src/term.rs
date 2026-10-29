@@ -8,7 +8,7 @@
 use serde::Deserialize;
 
 /// One of the nine IR ops (ADR-0165 rule 2).
-pub const OPS: [&str; 9] = [
+pub const OPS: [&str; 10] = [
     "tile_load",
     "unpack_i4",
     "dequant",
@@ -18,6 +18,7 @@ pub const OPS: [&str; 9] = [
     "reduce",
     "store",
     "bias",
+    "pipeline",
 ];
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -86,6 +87,8 @@ pub struct Qgemv {
     pub k: i64,
     pub split: i64,
     pub group: i64,
+    /// `pipeline` depth: 1 means the term declares no prefetching.
+    pub depth: i64,
 }
 
 /// Read a term as a `qgemv`, or say precisely why it is not one.
@@ -120,8 +123,23 @@ pub fn as_qgemv(root: &Node) -> Result<Qgemv, String> {
         return Err(format!("split geometry must be positive, got {k}/{parts}"));
     }
 
-    // body: dot(dequant(unpack_i4(load w, shifts), load z, load s, g), x)
-    let body = &sargs[2];
+    // body: an optional pipeline annotation around
+    // dot(dequant(unpack_i4(load w, shifts), load z, load s, g), x)
+    let mut depth = 1i64;
+    let mut body = &sargs[2];
+    if body.op() == Some("pipeline") {
+        let pargs = body.args().ok_or("pipeline has no args")?;
+        if pargs.len() != 2 {
+            return Err("pipeline wants (depth, body)".into());
+        }
+        depth = pargs[0]
+            .as_int()
+            .ok_or("pipeline's depth must be an integer")?;
+        if depth < 1 {
+            return Err(format!("pipeline depth must be >= 1, got {depth}"));
+        }
+        body = &pargs[1];
+    }
     if body.op() != Some("dot") {
         return Err(format!("split's body must be a dot, got {:?}", body.op()));
     }
@@ -155,7 +173,12 @@ pub fn as_qgemv(root: &Node) -> Result<Qgemv, String> {
     {
         return Err("dequant wants the `z` and `s` leaves".into());
     }
-    Ok(Qgemv { k, split: parts, group })
+    Ok(Qgemv {
+        k,
+        split: parts,
+        group,
+        depth,
+    })
 }
 
 fn check_ops(node: &Node) -> Result<(), String> {
