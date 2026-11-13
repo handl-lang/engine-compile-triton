@@ -2,6 +2,7 @@
 name = "compile-triton"
 version = "0.0.1"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Lower kernel IR terms to Triton source (ADR-0165)"
 
 [lib]
