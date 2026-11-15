@@ -13,6 +13,16 @@ The emitted module exposes `run(x, qw, qz, sc, n, k, bn, bk, warps)` —
 signature-compatible with the hand-written `gemv_split2`, so the equality
 gate and the referee can judge both without special-casing either.
 
+A second lowering path covers the ADR-0171 fragment: any
+`store(body, out)` term built from the pointwise ops (`mul`, `sub`,
+`neg`, `relu`, `exp`, `sigmoid`, `tanh`, `gelu`, `silu`, `bias`) over
+leaf operands lowers to one flat Triton elementwise kernel. `transpose`
+and `permute` are torch *views* replayed host-side before launch (the IR
+prices them at zero); `tile_load`/`pipeline` are identities. A view over
+a computed tile, a broadcast rank above 4, or a qgemv op (`dot`,
+`dequant`, `split`, …) outside its own path is refused loudly, not
+miscompiled.
+
 ## Develop
 
 ```bash

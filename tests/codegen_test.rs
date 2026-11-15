@@ -83,10 +83,10 @@ fn refuses_a_term_that_is_not_a_qgemv() {
 }
 
 #[test]
-fn refuses_an_op_outside_the_nine() {
+fn refuses_an_op_outside_the_twenty_one() {
     let bad = r#"{"op":"matmul","args":[]}"#;
     let err = as_qgemv(&parse(bad)).unwrap_err();
-    assert!(err.contains("not one of the nine"), "{err}");
+    assert!(err.contains("not one of the twenty-one"), "{err}");
 }
 
 #[test]
@@ -115,4 +115,221 @@ fn reads_pipeline_depth_from_the_term() {
 fn depth_defaults_to_one_without_the_annotation() {
     let q = as_qgemv(&parse(&term(896, 8, 128))).unwrap();
     assert_eq!(q.depth, 1);
+}
+
+// -- ADR-0171: elementwise/layout fragment ----------------------------------
+
+use compile_triton::term::{Expr, Lit, View};
+use compile_triton::{as_elementwise, emit_elementwise};
+
+fn leaf(name: &str) -> String {
+    format!(r#"{{"leaf":{{"name":"{name}"}}}}"#)
+}
+
+fn elem_term(body: &str) -> String {
+    format!(r#"{{"op":"store","args":[{body},{}]}}"#, leaf("out"))
+}
+
+#[test]
+fn reads_a_pointwise_body() {
+    // silu(mul(transpose(w, 0, 1), x)) — a decoder-tail spelling
+    let body = format!(
+        r#"{{"op":"silu","args":[{{"op":"mul","args":[
+            {{"op":"transpose","args":[{},0,1]}}, {}]}}]}}"#,
+        leaf("w"),
+        leaf("x")
+    );
+    let e = as_elementwise(&parse(&elem_term(&body))).expect("elementwise");
+    assert_eq!(e.operands.len(), 2);
+    assert_eq!(e.operands[0].name, "w");
+    assert_eq!(e.operands[0].views, vec![View::Transpose(0, 1)]);
+    assert_eq!(e.operands[1].name, "x");
+    assert!(e.operands[1].views.is_empty());
+    assert!(e.out_nullable);
+    assert_eq!(e.out_var, "out");
+}
+
+#[test]
+fn emits_the_elementwise_kernel() {
+    let body = r#"{"op":"silu","args":[{"op":"mul","args":[
+        {"op":"transpose","args":[{"leaf":{"name":"w"}},0,1]},
+        {"leaf":{"name":"x"}}]}]}"#;
+    let e = as_elementwise(&parse(&elem_term(body))).unwrap();
+    let src = emit_elementwise(&e);
+    assert!(src.contains("@triton.jit"));
+    assert!(src.contains("def _elem_kernel("));
+    assert!(src.contains("def run("));
+    assert!(src.contains("tl.exp"));
+    // silu = x * sigmoid(x): one exp inside the sigmoid form
+    assert!(!src.contains("0.7071067811865476"));
+    // the view replays host-side, never inside the kernel
+    assert!(src.contains("t.transpose(v[1], v[2])"));
+    assert!(src.contains(r#"("transpose", 0, 1)"#));
+    // broadcast machinery
+    assert!(src.contains("torch.broadcast_shapes"));
+    assert!(src.contains("_es(t, cs)"));
+    assert!(src.contains("res.to(out_p.dtype.element_ty)"));
+}
+
+#[test]
+fn covers_every_pointwise_op() {
+    for (op, needle) in [
+        ("mul", "*"),
+        ("sub", "-"),
+        ("neg", "(-("),
+        ("relu", "tl.maximum"),
+        ("exp", "tl.exp"),
+        ("sigmoid", "1.0 / (1.0 + tl.exp"),
+        ("tanh", "libdevice.tanh"),
+        ("gelu", "tl.math.erf"),
+        ("silu", "tl.exp"),
+        ("bias", "+"),
+    ] {
+        let args = if op == "neg"
+            || op == "relu"
+            || op == "exp"
+            || op == "sigmoid"
+            || op == "tanh"
+            || op == "gelu"
+            || op == "silu"
+        {
+            format!(r#"{{"op":"{op}","args":[{}]}}"#, leaf("x"))
+        } else {
+            format!(r#"{{"op":"{op}","args":[{},{}]}}"#, leaf("x"), leaf("b"))
+        };
+        let e =
+            as_elementwise(&parse(&elem_term(&args))).unwrap_or_else(|err| panic!("{op}: {err}"));
+        let src = emit_elementwise(&e);
+        assert!(src.contains(needle), "{op}: missing {needle}\n{src}");
+    }
+}
+
+#[test]
+fn permute_collects_dims_in_order() {
+    let body = format!(r#"{{"op":"permute","args":[{},2,0,1]}}"#, leaf("x"));
+    let e = as_elementwise(&parse(&elem_term(&body))).unwrap();
+    assert_eq!(e.operands[0].views, vec![View::Permute(vec![2, 0, 1])]);
+    let src = emit_elementwise(&e);
+    assert!(src.contains("t.permute(*v[1])"));
+}
+
+#[test]
+fn composed_views_replay_innermost_first() {
+    // permute(transpose(w, 0, 1), 1, 0): host applies transpose then permute
+    let body = format!(
+        r#"{{"op":"permute","args":[{{"op":"transpose","args":[{},0,1]}},1,0]}}"#,
+        leaf("w")
+    );
+    let e = as_elementwise(&parse(&elem_term(&body))).unwrap();
+    assert_eq!(
+        e.operands[0].views,
+        vec![View::Transpose(0, 1), View::Permute(vec![1, 0])]
+    );
+}
+
+#[test]
+fn tile_load_and_pipeline_are_identities() {
+    let body = format!(
+        r#"{{"op":"pipeline","args":[2,{{"op":"tile_load","args":[{}]}}]}}"#,
+        leaf("x")
+    );
+    let e = as_elementwise(&parse(&elem_term(&body))).unwrap();
+    assert!(matches!(e.expr, Expr::Load(_)));
+    assert_eq!(e.operands.len(), 1);
+}
+
+#[test]
+fn literals_become_kernel_constants() {
+    let body = format!(r#"{{"op":"mul","args":[{},2.5]}}"#, leaf("x"));
+    let e = as_elementwise(&parse(&elem_term(&body))).unwrap();
+    let has_float_lit = match &e.expr {
+        Expr::Binary(_, a, b) => {
+            matches!(&**a, Expr::Lit(Lit::Float(_))) || matches!(&**b, Expr::Lit(Lit::Float(_)))
+        }
+        _ => false,
+    };
+    assert!(has_float_lit, "{:?}", e.expr);
+    let src = emit_elementwise(&e);
+    assert!(src.contains("2.5"));
+}
+
+#[test]
+fn refuses_a_view_of_a_computed_tile() {
+    let body = format!(
+        r#"{{"op":"transpose","args":[{{"op":"mul","args":[{},{}]}},0,1]}}"#,
+        leaf("x"),
+        leaf("y")
+    );
+    let err = as_elementwise(&parse(&elem_term(&body))).unwrap_err();
+    assert!(err.contains("leaf operands"), "{err}");
+}
+
+#[test]
+fn refuses_qgemv_ops_in_the_fragment() {
+    for op in ["dot", "dequant", "unpack_i4", "split", "stage", "reduce"] {
+        let body = format!(r#"{{"op":"{op}","args":[]}}"#);
+        let err = as_elementwise(&parse(&elem_term(&body))).unwrap_err();
+        assert!(err.contains("elementwise fragment"), "{op}: {err}");
+    }
+}
+
+#[test]
+fn refuses_a_non_store_root() {
+    let err = as_elementwise(&parse(&leaf("x"))).unwrap_err();
+    assert!(err.contains("store"), "{err}");
+}
+
+#[test]
+fn refuses_bad_view_dims() {
+    // permute with no dims
+    let body = format!(r#"{{"op":"permute","args":[{}]}}"#, leaf("x"));
+    let err = as_elementwise(&parse(&elem_term(&body))).unwrap_err();
+    assert!(err.contains("permute"), "{err}");
+    // transpose with a float dim
+    let body = format!(r#"{{"op":"transpose","args":[{},0.5,1]}}"#, leaf("x"));
+    let err = as_elementwise(&parse(&elem_term(&body))).unwrap_err();
+    assert!(err.contains("integer literals"), "{err}");
+}
+
+#[test]
+fn out_leaf_can_be_a_read_leaf_too() {
+    // store(x, x): copy through the same binding — no =None default
+    let body = leaf("x");
+    let raw = format!(r#"{{"op":"store","args":[{body},{}]}}"#, leaf("x"));
+    let e = as_elementwise(&parse(&raw)).unwrap();
+    assert!(!e.out_nullable);
+    let src = emit_elementwise(&e);
+    assert!(src.contains("def run(x, block=1024, warps=4):"), "{src}");
+}
+
+#[test]
+fn odd_leaf_names_become_safe_params() {
+    let raw = format!(
+        r#"{{"op":"store","args":[{{"op":"relu","args":[{}]}},{{"leaf":{{"name":"out-put"}}}}]}}"#,
+        r#"{"leaf":{"name":"in put"}}"#
+    );
+    let e = as_elementwise(&parse(&raw)).unwrap();
+    let src = emit_elementwise(&e);
+    assert!(src.contains("def run("), "{src}");
+    // the mangled names must be valid python identifiers
+    for line in src.lines() {
+        if line.starts_with("def run(") {
+            assert!(!line.contains("in put"), "{line}");
+            assert!(!line.contains("out-put"), "{line}");
+        }
+    }
+}
+
+#[test]
+fn keyword_leaf_names_become_safe_params() {
+    let raw = format!(
+        r#"{{"op":"store","args":[{{"op":"relu","args":[{}]}},{{"leaf":{{"name":"out"}}}}]}}"#,
+        r#"{"leaf":{"name":"class"}}"#
+    );
+    let e = as_elementwise(&parse(&raw)).unwrap();
+    let src = emit_elementwise(&e);
+    assert!(
+        src.contains("def run(class_, out=None, block=1024, warps=4):"),
+        "{src}"
+    );
 }

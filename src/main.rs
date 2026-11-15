@@ -2,8 +2,8 @@
 
 use std::io::Read;
 
-use compile_triton::{as_qgemv, emit};
 use compile_triton::term::Node;
+use compile_triton::{as_elementwise, as_qgemv, emit, emit_elementwise};
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args().skip(1);
@@ -31,14 +31,23 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    // Two lowering paths: the packed qgemv kernel, then the ADR-0171
+    // elementwise/layout fragment. A term that fits neither is refused
+    // with both reasons.
     match as_qgemv(&node) {
         Ok(q) => {
             print!("{}", emit(&q, block_n, block_k));
             std::process::ExitCode::SUCCESS
         }
-        Err(err) => {
-            eprintln!("not a lowerable qgemv term: {err}");
-            std::process::ExitCode::FAILURE
-        }
+        Err(qerr) => match as_elementwise(&node) {
+            Ok(e) => {
+                print!("{}", emit_elementwise(&e));
+                std::process::ExitCode::SUCCESS
+            }
+            Err(eerr) => {
+                eprintln!("not a lowerable term:\n  qgemv: {qerr}\n  elementwise: {eerr}");
+                std::process::ExitCode::FAILURE
+            }
+        },
     }
 }
