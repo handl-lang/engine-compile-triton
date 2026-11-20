@@ -4,6 +4,10 @@ version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Lower kernel IR terms to Triton source (ADR-0165)"
+repository = "https://github.com/handl-lang/compile-triton"
+readme = "README.md"
+keywords = ["handl", "triton", "gpu", "compiler"]
+categories = ["compilers", "science"]
 
 [lib]
 name = "compile_triton"

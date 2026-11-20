@@ -1,9 +1,8 @@
 # compile-triton
 
-Lowers a kernel IR `Term` (ADR-0165, `lib-kernel-ir`) to Triton source.
-
-The term is the input, the source is the output, and neither is a
-template someone edited by hand for one shape:
+Lowers a kernel IR `Term` to Triton source: a term JSON on stdin becomes
+a `.py` Triton kernel on stdout — signature-compatible launchers, no
+hand-edited templates.
 
 ```bash
 echo '{"op":"store","args":[...]}' | cargo run --quiet -- --block-n 64 --block-k 128 > k.py
@@ -13,7 +12,7 @@ The emitted module exposes `run(x, qw, qz, sc, n, k, bn, bk, warps)` —
 signature-compatible with the hand-written `gemv_split2`, so the equality
 gate and the referee can judge both without special-casing either.
 
-A second lowering path covers the ADR-0171 fragment: any
+A second lowering path covers the elementwise fragment: any
 `store(body, out)` term built from the pointwise ops (`mul`, `sub`,
 `neg`, `relu`, `exp`, `sigmoid`, `tanh`, `gelu`, `silu`, `bias`) over
 leaf operands lowers to one flat Triton elementwise kernel. `transpose`
@@ -23,10 +22,17 @@ a computed tile, a broadcast rank above 4, or a qgemv op (`dot`,
 `dequant`, `split`, …) outside its own path is refused loudly, not
 miscompiled.
 
-## Develop
+## Development
 
 ```bash
-cargo test                 # tests/codegen_test.rs — the emitted-source contract
+cargo xtask gate                            # fmt --check → clippy -D warnings → test → doc
+cargo test                                 # tests/codegen_test.rs — the emitted-source contract
 cargo run --quiet -- --block-n 64 --block-k 128   # stdin term JSON -> .py
-bash ci.sh                 # the bupha gate: cargo check + cargo test
 ```
+
+`ci.sh` is the gate entry. Deps resolve from git, so no sibling
+checkouts are needed; a plain clone test-runs as-is.
+
+## License
+
+MIT.
