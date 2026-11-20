@@ -1,4 +1,4 @@
-# compile-triton
+# engine-compile-triton
 
 Lowers a kernel IR `Term` to Triton source: a term JSON on stdin becomes
 a `.py` Triton kernel on stdout — signature-compatible launchers, no
