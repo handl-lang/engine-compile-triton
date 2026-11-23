@@ -6,9 +6,17 @@
 //!   -> as_elementwise -> emit_elementwise (the ADR-0171 pointwise/layout
 //!                                        fragment: one flat Triton kernel)
 //! ```
+//!
+//! [`kernel_term`] adds the desired-state half (PL-004 T-094):
+//! [`KernelTerm`] is the wire term as an `IrModule` and
+//! [`TritonEmitter`] its `Emitter<KernelTerm>` — `materialize`
+//! produces the same `kernel_triton_<hash>.py` `Change` kernelopt's
+//! Python `lower.py` declares, natively, no subprocess.
 
 pub mod codegen;
+pub mod kernel_term;
 pub mod term;
 
 pub use codegen::{emit, emit_elementwise};
+pub use kernel_term::{artifact_name, compile, KernelTerm, TritonEmitter, KERNEL_TERM_KIND};
 pub use term::{as_elementwise, as_qgemv, Elementwise, Expr, Node, Operand, Qgemv, View};
