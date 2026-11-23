@@ -24,8 +24,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Desired-state kernel: `KernelTerm` implements `IrModule` and
 # `TritonEmitter` implements `Emitter<KernelTerm>` over it (PL-004
-# T-094). Path dep — engine-codegen has no git remote yet.
-hnl-engine-codegen = { path = "../engine-codegen" }
+# T-094). Git dep — the sibling checkout wins via `[patch]`.
+hnl-engine-codegen = { git = "https://github.com/handl-lang/engine-codegen", branch = "main" }
 
 [dev-dependencies]
 serde_json = "1"
+
+# ADR-0128 §Resolution: the sibling checkout wins locally; CI resolves
+# the `branch = "main"` git deps.
+[patch."https://github.com/handl-lang/engine-codegen"]
+hnl-engine-codegen = { path = "../engine-codegen" }
