@@ -25,13 +25,16 @@ miscompiled.
 ## Development
 
 ```bash
-cargo xtask gate                            # fmt --check → clippy -D warnings → test → doc
+cargo run --manifest-path xtask/Cargo.toml -- gate   # fmt → clippy → test → doc
 cargo test                                 # tests/codegen_test.rs — the emitted-source contract
 cargo run --quiet -- --block-n 64 --block-k 128   # stdin term JSON -> .py
 ```
 
-`ci.sh` is the gate entry. Deps resolve from git, so no sibling
-checkouts are needed; a plain clone test-runs as-is.
+`xtask/` provides the gate tasks (`fmt`, `clippy`, `test`, `doc`, `check`,
+`gate`); `ci.sh` is the same gate entry for the bupha shell runner. Deps
+are git deps on `branch = "main"`; locally the workspace-root
+`.cargo/config.toml` patches them to sibling checkouts (dev-only, never
+committed).
 
 ## License
 

@@ -8,6 +8,8 @@ repository = "https://github.com/handl-lang/engine-compile-triton"
 readme = "README.md"
 keywords = ["handl", "triton", "gpu", "compiler"]
 categories = ["compilers", "science"]
+# Git-install only: https://github.com/handl-lang/engine-compile-triton (no crates.io).
+publish = false
 
 [lib]
 name = "compile_triton"
