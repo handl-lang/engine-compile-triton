@@ -14,13 +14,13 @@
 //! the slugs agree; re-formatted JSON parses fine but hashes
 //! differently — that is honest (different bytes, different artifact).
 //!
-//! `Emitter::verify` stays structural, mirroring `engine-fmt`'s
+//! `Emitter::verify` stays structural, mirroring `tool-fmt`'s
 //! `FmtEmitter`: the change set must be exactly the one `Put` this
 //! emitter promised. There is no Triton/CUDA runner in this repo, so
 //! artifact-level verify remains the producer-side term-denotation
 //! gate (`KernelSink.verify` / `verify_lowered` in kernelopt).
 
-use hnl_engine_codegen::{
+use hnl_tool_codegen::{
     ArtifactRef, Change, CodegenError, ContentHash, EmitContext, Emitter, IrKind, IrModule,
 };
 
