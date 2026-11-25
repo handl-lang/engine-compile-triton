@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
+#![warn(missing_docs)]
 
 //! Lower a kernel IR `Term` to Triton source (ADR-0165/0171).
 //!

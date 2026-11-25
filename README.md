@@ -31,7 +31,8 @@ cargo run --quiet -- --block-n 64 --block-k 128   # stdin term JSON -> .py
 ```
 
 `xtask/` provides the gate tasks (`fmt`, `clippy`, `test`, `doc`, `check`,
-`gate`); `ci.sh` is the same gate entry for the bupha shell runner. Deps
+`gate`); bupha/the fleet runner executes the `workflows/gate.yaml`
+peregrin campaign (see `bupha.toml`) — there is no `ci.sh`. Deps
 are git deps on `branch = "main"`; locally the workspace-root
 `.cargo/config.toml` patches them to sibling checkouts (dev-only, never
 committed).

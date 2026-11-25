@@ -2,6 +2,7 @@
 name = "compile-triton"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Lower kernel IR terms to Triton source (ADR-0165)"
 repository = "https://github.com/handl-lang/tool-compile-triton"
@@ -30,7 +31,6 @@ hnl-tool-codegen = { git = "https://github.com/handl-lang/tool-codegen", branch 
 [dev-dependencies]
 serde_json = "1"
 
-# ADR-0128 §Resolution: the sibling checkout wins locally; CI resolves
-# the `branch = "main"` git deps.
-[patch."https://github.com/handl-lang/tool-codegen"]
-hnl-tool-codegen = { path = "../tool-codegen" }
+# No `[patch]` tables here: committed manifests must resolve from git alone.
+# Local sibling overrides live in the gitignored workspace-root
+# `.cargo/config.toml` (which already patches tool-codegen → ../tool-codegen).
