@@ -7,3 +7,6 @@
 
 # myco worktree mount point (created by `myco init`)
 project/
+
+# xtask is a separate workspace; its target dir is local build output.
+/xtask/target/

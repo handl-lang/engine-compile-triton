@@ -117,6 +117,92 @@ fn depth_defaults_to_one_without_the_annotation() {
     assert_eq!(q.depth, 1);
 }
 
+#[test]
+fn refuses_wrong_leaf_kinds() {
+    // `x` sliced as a group row denotes a different tensor — refuse.
+    let bad = term(4864, 4, 128).replace(
+        r#"{"leaf":{"name":"x","kind":"k"}}"#,
+        r#"{"leaf":{"name":"x","kind":"g","div":128}}"#,
+    );
+    let err = as_qgemv(&parse(&bad)).unwrap_err();
+    assert!(err.contains("kind"), "{err}");
+    // `w` must be k-indexed too.
+    let bad = term(4864, 4, 128).replace(
+        r#"{"leaf":{"name":"w","kind":"k"}}"#,
+        r#"{"leaf":{"name":"w","kind":"out"}}"#,
+    );
+    let err = as_qgemv(&parse(&bad)).unwrap_err();
+    assert!(err.contains("kind"), "{err}");
+}
+
+#[test]
+fn refuses_z_s_with_wrong_group_div() {
+    // z/s are group-indexed with div == group; a div of 64 under
+    // group=128 denotes per-64 rows the kernel cannot produce.
+    let bad = term(4864, 4, 128).replace(r#""div":128"#, r#""div":64"#);
+    let err = as_qgemv(&parse(&bad)).unwrap_err();
+    assert!(err.contains("div"), "{err}");
+}
+
+#[test]
+fn refuses_a_computed_shifts_argument() {
+    // unpack_i4's shifts must be a leaf — the kernel hardcodes the
+    // nibble order, so anything else denotes different values.
+    let bad = term(4864, 4, 128).replace(
+        r#"{"leaf":{"name":"shifts"}}"#,
+        r#"{"op":"neg","args":[{"leaf":{"name":"shifts"}}]}"#,
+    );
+    let err = as_qgemv(&parse(&bad)).unwrap_err();
+    assert!(err.contains("shifts"), "{err}");
+}
+
+#[test]
+fn refuses_sliced_shifts_leaf() {
+    let bad = term(4864, 4, 128).replace(
+        r#"{"leaf":{"name":"shifts"}}"#,
+        r#"{"leaf":{"name":"shifts","kind":"k"}}"#,
+    );
+    let err = as_qgemv(&parse(&bad)).unwrap_err();
+    assert!(err.contains("shifts"), "{err}");
+}
+
+#[test]
+fn emitted_source_parses_as_python() {
+    // Both lowering paths must emit syntactically valid Python. Skips
+    // silently where no interpreter is on PATH (the gate host has one).
+    let q = as_qgemv(&parse(&term(4864, 4, 128))).unwrap();
+    let elem_body = r#"{"op":"silu","args":[{"op":"mul","args":[
+        {"op":"transpose","args":[{"leaf":{"name":"w"}},0,1]},
+        {"leaf":{"name":"x"}}]}]}"#;
+    let e = as_elementwise(&parse(&elem_term(elem_body))).unwrap();
+    for (name, src) in [
+        ("qgemv", emit(&q, 64, 128)),
+        ("elementwise", emit_elementwise(&e)),
+    ] {
+        let status = std::process::Command::new("python3")
+            .args(["-c", "import ast,sys; ast.parse(sys.stdin.read())"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(src.as_bytes())
+                    .unwrap();
+                child.wait()
+            });
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => panic!("{name} output is not valid Python: {s}"),
+            Err(_) => eprintln!("skipping ast.parse check: no python3"),
+        }
+    }
+}
+
 // -- ADR-0171: elementwise/layout fragment ----------------------------------
 
 use compile_triton::term::{Expr, Lit, View};
@@ -169,6 +255,9 @@ fn emits_the_elementwise_kernel() {
     assert!(src.contains("torch.broadcast_shapes"));
     assert!(src.contains("_es(t, cs)"));
     assert!(src.contains("res.to(out_p.dtype.element_ty)"));
+    // launch guards: pow2 block, store-target shape compatibility
+    assert!(src.contains("block must be a power of two"));
+    assert!(src.contains("cannot hold"));
 }
 
 #[test]
@@ -270,6 +359,30 @@ fn refuses_qgemv_ops_in_the_fragment() {
         let body = format!(r#"{{"op":"{op}","args":[]}}"#);
         let err = as_elementwise(&parse(&elem_term(&body))).unwrap_err();
         assert!(err.contains("elementwise fragment"), "{op}: {err}");
+    }
+}
+
+#[test]
+fn refuses_a_viewed_store_target_alias() {
+    // store(mul(transpose(w, 0, 1), x), w): `w` is read through a view
+    // and written flat — kernel lanes would race where torch's copy_
+    // is sequential. Refused, not approximated.
+    let body = format!(
+        r#"{{"op":"mul","args":[{{"op":"transpose","args":[{},0,1]}},{}]}}"#,
+        leaf("w"),
+        leaf("x")
+    );
+    let raw = format!(r#"{{"op":"store","args":[{body},{}]}}"#, leaf("w"));
+    let err = as_elementwise(&parse(&raw)).unwrap_err();
+    assert!(err.contains("layout view"), "{err}");
+}
+
+#[test]
+fn refuses_a_bad_pipeline_depth() {
+    for depth in ["0", "-1", "\"deep\""] {
+        let body = format!(r#"{{"op":"pipeline","args":[{depth},{}]}}"#, leaf("x"));
+        let err = as_elementwise(&parse(&elem_term(&body))).unwrap_err();
+        assert!(err.contains("pipeline depth"), "{depth}: {err}");
     }
 }
 

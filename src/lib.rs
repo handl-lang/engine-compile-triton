@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
 //! Lower a kernel IR `Term` to Triton source (ADR-0165/0171).
 //!
 //! ```text
@@ -18,5 +21,5 @@ pub mod kernel_term;
 pub mod term;
 
 pub use codegen::{emit, emit_elementwise};
-pub use kernel_term::{artifact_name, compile, KernelTerm, TritonEmitter, KERNEL_TERM_KIND};
-pub use term::{as_elementwise, as_qgemv, Elementwise, Expr, Node, Operand, Qgemv, View};
+pub use kernel_term::{KERNEL_TERM_KIND, KernelTerm, TritonEmitter, artifact_name, compile};
+pub use term::{Elementwise, Expr, Node, Operand, Qgemv, View, as_elementwise, as_qgemv};

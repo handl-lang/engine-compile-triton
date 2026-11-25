@@ -33,11 +33,20 @@ pub const OPS: [&str; 21] = [
     "silu",
 ];
 
+/// A named operand bound in the launch environment.
+///
+/// `kind`/`div` are the `lib-kernel-ir` slicing contract: `"k"` rows are
+/// k-indexed, `"g"` rows are group-indexed (`div` groups per k element),
+/// `"out"` is never sliced. The qgemv path checks them — see
+/// [`as_qgemv`].
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct Leaf {
+    /// The environment binding name.
     pub name: String,
+    /// Slicing kind: `"k"`, `"g"`, or `"out"` (default `"out"`).
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// Groups per k element for `kind == "g"` (default 1).
     #[serde(default = "one")]
     pub div: i64,
 }
@@ -50,25 +59,32 @@ fn one() -> i64 {
     1
 }
 
+/// One node of the wire term: an op application, a leaf, or a literal.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Node {
     /// `{"op": ..., "args": [...]}`
     Term {
+        /// The op name — one of [`OPS`].
         op: String,
+        /// The op's arguments.
         args: Vec<Node>,
     },
     /// `{"leaf": {...}}`
     Leaf {
+        /// The leaf binding.
         leaf: Leaf,
     },
-    /// a literal
+    /// A literal
     Int(i64),
+    /// A literal
     Float(f64),
+    /// A literal
     Str(String),
 }
 
 impl Node {
+    /// The op name for a `Term` node, `None` otherwise.
     pub fn op(&self) -> Option<&str> {
         match self {
             Node::Term { op, .. } => Some(op),
@@ -76,6 +92,7 @@ impl Node {
         }
     }
 
+    /// The argument list for a `Term` node, `None` otherwise.
     pub fn args(&self) -> Option<&[Node]> {
         match self {
             Node::Term { args, .. } => Some(args),
@@ -83,6 +100,7 @@ impl Node {
         }
     }
 
+    /// The binding name for a `Leaf` node, `None` otherwise.
     pub fn leaf_name(&self) -> Option<&str> {
         match self {
             Node::Leaf { leaf } => Some(&leaf.name),
@@ -90,6 +108,7 @@ impl Node {
         }
     }
 
+    /// The value for an `Int` literal node, `None` otherwise.
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Node::Int(i) => Some(*i),
@@ -101,8 +120,11 @@ impl Node {
 /// What a `qgemv` term has to say: the geometry and the split.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Qgemv {
+    /// `K` — the contracted axis length, baked into the emitted module.
     pub k: i64,
+    /// `SPLIT` — number of k-partitions (stage-1 programs per n-block).
     pub split: i64,
+    /// `GROUP` — dequant group size in k elements.
     pub group: i64,
     /// `pipeline` depth: 1 means the term declares no prefetching.
     pub depth: i64,
@@ -189,12 +211,62 @@ pub fn as_qgemv(root: &Node) -> Result<Qgemv, String> {
     if deargs[1].leaf_name() != Some("z") || deargs[2].leaf_name() != Some("s") {
         return Err("dequant wants the `z` and `s` leaves".into());
     }
+
+    // The kernel reads `w`/`x` as k-indexed rows and `z`/`s` as
+    // group-indexed rows (`g = k // GROUP`); `lib_kernel_ir.qgemv`
+    // spells exactly that. A leaf whose `kind`/`div` says otherwise
+    // denotes a *different* tensor under `split` — lowering it to the
+    // same kernel would be a silent miscompile, so the kinds are part
+    // of the contract, not decoration.
+    let w = leaf(&uargs[0]).ok_or("unpack_i4's `w` must be a leaf")?;
+    if w.kind != "k" {
+        return Err(format!(
+            "unpack_i4's `w` leaf must be kind \"k\", got {:?}",
+            w.kind
+        ));
+    }
+    // `shifts` never reaches the kernel — the nibble order is baked
+    // into the emitted shifts — so it must be an unsliced leaf; any
+    // other node (or a k/g-sliced leaf) denotes something else.
+    let shifts = leaf(&uargs[1]).ok_or("unpack_i4's `shifts` must be a leaf")?;
+    if shifts.kind != "out" {
+        return Err(format!(
+            "unpack_i4's `shifts` leaf must be kind \"out\" (the kernel \
+             hardcodes the nibble order), got {:?}",
+            shifts.kind
+        ));
+    }
+    let x = leaf(&dargs[1]).ok_or("dot's `x` must be a leaf")?;
+    if x.kind != "k" {
+        return Err(format!(
+            "dot's `x` leaf must be kind \"k\", got {:?}",
+            x.kind
+        ));
+    }
+    for (arg, name) in [(&deargs[1], "z"), (&deargs[2], "s")] {
+        let l = leaf(arg).ok_or("dequant's `z`/`s` must be leaves")?;
+        if l.kind != "g" || l.div != group {
+            return Err(format!(
+                "dequant's `{name}` leaf must be kind \"g\" with div == \
+                 group ({group}), got kind {:?} div {}",
+                l.kind, l.div
+            ));
+        }
+    }
     Ok(Qgemv {
         k,
         split: parts,
         group,
         depth,
     })
+}
+
+/// The `Leaf` inside a `Node::Leaf`, or `None` for any other node.
+fn leaf(node: &Node) -> Option<&Leaf> {
+    match node {
+        Node::Leaf { leaf } => Some(leaf),
+        _ => None,
+    }
 }
 
 fn check_ops(node: &Node) -> Result<(), String> {
@@ -232,29 +304,36 @@ fn check_ops(node: &Node) -> Result<(), String> {
 /// (innermost first — the order the host replays on the tensor).
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
+    /// `transpose(tensor, dim0, dim1)`.
     Transpose(i64, i64),
+    /// `permute(tensor, dims...)`.
     Permute(Vec<i64>),
 }
 
 /// A read operand: a leaf name plus the view ops wrapped around it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Operand {
+    /// The leaf's environment binding name.
     pub name: String,
+    /// View ops in application order (innermost first).
     pub views: Vec<View>,
 }
 
 /// A scalar literal inside the expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
+    /// An integer literal.
     Int(i64),
+    /// A float literal.
     Float(f64),
 }
 
 /// The lowered body: a tree of elementwise ops over operand loads.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    /// index into `Elementwise::operands`
+    /// A load of `Elementwise::operands[i]`.
     Load(usize),
+    /// A scalar literal.
     Lit(Lit),
     /// neg relu exp sigmoid tanh gelu silu
     Unary(&'static str, Box<Expr>),
@@ -265,6 +344,7 @@ pub enum Expr {
 /// A `store(body, out)` term in the elementwise/layout fragment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Elementwise {
+    /// The lowered expression tree over [`Expr::Load`] indices.
     pub expr: Expr,
     /// unique (name, views) read operands, in first-appearance order
     pub operands: Vec<Operand>,
@@ -297,19 +377,35 @@ pub fn as_elementwise(root: &Node) -> Result<Elementwise, String> {
         .to_string();
 
     // `pipeline` denotes the identity; the elementwise kernel is a single
-    // launch, so the depth annotation carries nothing here.
+    // launch, so the depth annotation carries nothing here — but the
+    // denotation still requires a positive integer depth, so a term that
+    // would fail `OPS["pipeline"].denote` is refused, not approximated.
     let mut body = &args[0];
     while body.op() == Some("pipeline") {
-        let pargs = body.args().ok_or("pipeline has no args")?;
-        if pargs.len() != 2 {
-            return Err("pipeline wants (depth, body)".into());
-        }
-        body = &pargs[1];
+        body = pipeline_body(body)?;
     }
 
     let mut operands: Vec<Operand> = Vec::new();
     let mut leaf_order: Vec<String> = Vec::new();
     let expr = build_expr(body, &mut operands, &mut leaf_order)?;
+
+    // A store target that is also a read operand is only safe when the
+    // read is *unviewed*: then the operand tensor IS `out`, its shape is
+    // the broadcast shape (the launch check requires `out.shape == canon`),
+    // and every element reads and writes the same address — the kernel's
+    // unordered lanes cannot observe a difference. A *viewed* occurrence
+    // reads through permuted strides while the store writes flat: lanes
+    // race, where torch's `copy_` is sequential. Refuse, don't gamble.
+    if operands
+        .iter()
+        .any(|o| o.name == out_name && !o.views.is_empty())
+    {
+        return Err(format!(
+            "store target {out_name:?} is read through a layout view — \
+             an in-place store over a viewed operand has no honest \
+             single-kernel transcription"
+        ));
+    }
 
     // env: read leaves in first-appearance order, then the store target
     // if its name is not already bound.
@@ -336,6 +432,22 @@ pub fn as_elementwise(root: &Node) -> Result<Elementwise, String> {
         out_var,
         out_nullable,
     })
+}
+
+/// Unwrap one `pipeline(depth, body)` node, checking the depth the way
+/// `OPS["pipeline"].denote` does: an integer literal >= 1.
+fn pipeline_body(node: &Node) -> Result<&Node, String> {
+    let args = node.args().ok_or("pipeline has no args")?;
+    if args.len() != 2 {
+        return Err("pipeline wants (depth, body)".into());
+    }
+    match args[0].as_int() {
+        Some(d) if d >= 1 => Ok(&args[1]),
+        _ => Err(format!(
+            "pipeline depth must be an integer literal >= 1, got {:?}",
+            args[0]
+        )),
+    }
 }
 
 const PY_KEYWORDS: [&str; 35] = [
@@ -402,12 +514,7 @@ fn build_expr(
                 }
                 build_expr(&args[0], operands, leaf_order)
             }
-            "pipeline" => {
-                if args.len() != 2 {
-                    return Err("pipeline wants (depth, body)".into());
-                }
-                build_expr(&args[1], operands, leaf_order)
-            }
+            "pipeline" => pipeline_body(node).and_then(|b| build_expr(b, operands, leaf_order)),
             "transpose" | "permute" => {
                 let (name, views) = view_operand(node)?;
                 if !leaf_order.contains(&name) {
@@ -506,7 +613,7 @@ fn view_operand(node: &Node) -> Result<(String, Vec<View>), String> {
                     return Err(format!(
                         "a view chain bottoms out on {op:?}, not a leaf — \
                          layout ops lower only over leaf operands"
-                    ))
+                    ));
                 }
             },
             _ => return Err("a layout op must sit on a leaf operand, not a literal".into()),

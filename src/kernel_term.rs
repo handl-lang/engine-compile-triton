@@ -49,7 +49,7 @@ impl KernelTerm {
     /// rejects; *lowerability* is the emitter's call, not the parser's.
     pub fn parse(raw: &str) -> Result<Self, String> {
         let node: Node =
-            serde_json::from_str(raw).map_err(|e| format!("term is not valid JSON: {e}"))?;
+            serde_json::from_str(raw).map_err(|e| format!("term is not a kernel-ir node: {e}"))?;
         Ok(Self {
             raw: raw.to_string(),
             node,

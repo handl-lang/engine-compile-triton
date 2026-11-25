@@ -228,23 +228,89 @@ def _reduce(part_ptr, out_ptr, N, SPLIT, s_pk, s_pn, BLOCK: tl.constexpr):
         acc += tl.load(
             part_ptr + j * s_pk + rn * s_pn, mask=mask, other=0.0
         )
-    tl.store(out_ptr + rn, acc.to(tl.float16), mask=mask)
+    # cast to the caller's dtype — `store` denotes `tile.to(out.dtype)`
+    tl.store(out_ptr + rn, acc.to(out_ptr.dtype.element_ty), mask=mask)
 "#;
 
     let runner = r#"
 
 def run(x, qw, qz, sc, n, k, bn=BLOCK_N_DEFAULT, bk=BLOCK_K_DEFAULT,
         warps=2, out=None):
-    """Run the lowered kernel. The term, not the caller, fixes K/SPLIT."""
+    """Run the lowered kernel. The term, not the caller, fixes K/SPLIT.
+
+    `qw` is the packed int4 weights as int32 ``[k, >=ceil(n/8)]`` — or
+    int64 ``[k, >=ceil(n/16)]`` (the same bytes viewed wider; the kernel
+    then takes the `_stage1_w64` path unconditionally). `qz` is the
+    packed zeros, int32 ``[ceil(k/GROUP), >=ceil(n/8)]``; `sc` the
+    per-group fp scales ``[ceil(k/GROUP), >=n]``; `x` a contiguous
+    flat ``[>=k]`` activation; `out`` an optional contiguous fp tensor
+    of ``>= n`` elements (fp16 by convention — the store casts to the
+    tensor's dtype).
+    """
     if k != K:
         raise ValueError(f"lowered for K={K}, called with k={k}")
-    if bk > GROUP:
+    if n <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    # tl.arange needs powers of two; BLOCK_N//16 words per row in the
+    # w64 path means BLOCK_N must be a multiple of 16.
+    if bn <= 0 or bn & (bn - 1) or bn % 16:
         raise ValueError(
-            f"hoisted dequant needs BLOCK_K <= GROUP ({GROUP}), got {bk}"
+            f"BLOCK_N must be a power of two multiple of 16, got {bn}"
         )
+    if bk <= 0 or bk & (bk - 1):
+        raise ValueError(f"BLOCK_K must be a power of two, got {bk}")
+    # The hoisted dequant reads one z/s row per BLOCK_K-aligned block,
+    # so a block must never straddle a group boundary: BLOCK_K must
+    # divide GROUP (both powers of two in practice, but the term's
+    # GROUP is an arbitrary positive int).
+    if bk > GROUP or GROUP % bk:
+        raise ValueError(
+            f"hoisted dequant needs 0 < BLOCK_K <= GROUP ({GROUP}) and "
+            f"GROUP % BLOCK_K == 0, got bk={bk}"
+        )
+    grows = (k + GROUP - 1) // GROUP
+    if not x.is_contiguous() or x.numel() < k or not x.is_floating_point():
+        raise ValueError(
+            "x must be a contiguous floating-point tensor with >= k elems"
+        )
+    if qw.dim() != 2 or qw.size(0) < k:
+        raise ValueError("qw must be a 2-D packed tensor with >= k rows")
+    if qw.dtype == torch.int64:
+        if qw.size(1) * 16 < n:
+            raise ValueError(
+                f"qw int64 needs >= ceil(n/16)={-(-n // 16)} cols, "
+                f"got {qw.size(1)}"
+            )
+        qw64 = qw
+        use64 = True
+    elif qw.dtype == torch.int32:
+        if qw.size(1) * 8 < n:
+            raise ValueError(
+                f"qw int32 needs >= ceil(n/8)={-(-n // 8)} cols, "
+                f"got {qw.size(1)}"
+            )
+        # int64 words halve the load count — only for a contiguous
+        # tensor with an even word count (implies n % 16 == 0).
+        use64 = qw.is_contiguous() and qw.size(1) % 2 == 0
+        qw64 = qw.view(torch.int64) if use64 else qw
+    else:
+        raise ValueError(
+            f"qw must be int32 or int64 packed words, got {qw.dtype}"
+        )
+    if qz.dim() != 2 or qz.size(0) < grows or qz.size(1) * 8 < n:
+        raise ValueError(
+            f"qz must be int32 [>= {grows}, >= ceil(n/8)] packed zeros"
+        )
+    if qz.dtype != torch.int32:
+        raise ValueError(f"qz must be int32, got {qz.dtype}")
+    if sc.dim() != 2 or sc.size(0) < grows or sc.size(1) < n:
+        raise ValueError(
+            f"sc must be [>= {grows}, >= {n}] per-group scales"
+        )
+    if not sc.is_floating_point():
+        raise ValueError(f"sc must be floating-point, got {sc.dtype}")
     parts = torch.empty((SPLIT, n), device="cuda", dtype=torch.float32)
-    if qw.shape[1] % 2 == 0 and qw.is_contiguous():
-        qw64 = qw.view(torch.int64)
+    if use64:
         _stage1_w64[(triton.cdiv(n, bn), SPLIT)](
             x,
             qw64,
@@ -294,6 +360,10 @@ def run(x, qw, qz, sc, n, k, bn=BLOCK_N_DEFAULT, bk=BLOCK_K_DEFAULT,
         )
     if out is None:
         out = torch.empty((1, n), device="cuda", dtype=torch.float16)
+    elif not out.is_contiguous() or out.numel() < n:
+        raise ValueError(
+            "out must be a contiguous tensor with >= n elements"
+        )
     _reduce[(triton.cdiv(n, 128),)](
         parts,
         out,
@@ -339,8 +409,30 @@ fn views_py(views: &[View]) -> String {
     }
 }
 
+/// Render `s` as a Python string literal. Rust's `{:?}` escapes like
+/// `\u{7f}` are *not* Python — this emits only escapes Python parses.
+fn py_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn operand_py(o: &Operand) -> String {
-    format!("({:?}, {})", o.name, views_py(&o.views))
+    format!("({}, {})", py_str(&o.name), views_py(&o.views))
 }
 
 /// Triton expression for one elementwise node. `p{i}`/`s{i}_{d}` are the
@@ -409,7 +501,7 @@ pub fn emit_elementwise(e: &Elementwise) -> String {
     let env_lit = e
         .env
         .iter()
-        .map(|(leaf, py)| format!("{leaf:?}: {py}"))
+        .map(|(leaf, py)| format!("{}: {py}", py_str(leaf)))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -515,6 +607,10 @@ def run({sig}, block=1024, warps=4):
     operand dtype). `transpose`/`permute` views are applied here as torch
     views — they move no bytes, matching the IR's zero cost.
     """
+    if block <= 0 or block & (block - 1):
+        raise ValueError(f"block must be a power of two, got {{block}}")
+    if warps < 1:
+        raise ValueError(f"warps must be >= 1, got {{warps}}")
     env = {{{env_lit}}}
     tensors = []
     for name, vs in _OPERANDS:
@@ -527,13 +623,22 @@ def run({sig}, block=1024, warps=4):
         tensors.append(t)
     out_t = {out_var}
     shapes = [tuple(t.shape) for t in tensors]
-    if out_t is not None:
-        shapes.append(tuple(out_t.shape))
     canon = torch.broadcast_shapes(*shapes) if shapes else ()
     if len(canon) > 4:
         raise ValueError(
             f"elementwise lowering supports broadcast rank <= 4, got {{canon}}"
         )
+    if out_t is not None:
+        # `store` denotes `out.copy_(tile)`: the target's shape must be
+        # exactly the broadcast the tile expands to — anything else is
+        # either a torch error or, worse, an out-of-bounds write here.
+        want = torch.broadcast_shapes(canon, tuple(out_t.shape))
+        if want != tuple(out_t.shape):
+            raise ValueError(
+                f"store target shape {{tuple(out_t.shape)}} cannot hold "
+                f"the broadcast tile shape {{canon}}"
+            )
+        canon = want
     cs = (1,) * (4 - len(canon)) + canon
     numel = 1
     for d in canon:
