@@ -1,7 +1,7 @@
 # tool-compile-triton
 
-kernel IR `Term` → Triton Python source (ADR-0165/0171) — `compile-triton`
-crate (`compile_triton` lib + `compile-triton` bin), Rust 2024,
+kernel IR `Term` → Triton Python source (ADR-0165/0171) — `tool-compile-triton`
+crate (`tool_compile_triton` lib + `tool-compile-triton` bin), Rust 2024,
 `publish = false` (git-install only).  A term JSON on stdin becomes a
 `.py` Triton kernel on stdout; no hand-edited templates.
 
@@ -50,8 +50,9 @@ crate (`compile_triton` lib + `compile-triton` bin), Rust 2024,
   readiness D7).
 - Edition 2024, `#![forbid(unsafe_code)]`, `#![warn(missing_docs)]`,
   `rust-version = "1.85"`, `publish = false`.
-- Do NOT rename the crate (`compile-triton`/`compile_triton`) — sibling
-  git deps reference it by name.
+- Crate/bin names match the repo (`tool-compile-triton` /
+  `tool_compile_triton`) — sibling git deps and kernelopt's
+  `lower.py` reference them by name; rename both sides together.
 
 ## Verification
 

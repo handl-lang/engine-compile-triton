@@ -5,7 +5,7 @@
 //! `lib-kernel-ir` is Python-only, so the IR this crate consumes is the
 //! *wire format* the Python side serializes (`{"op": ..., "args":
 //! [...]}` terms, `{"leaf": {...}}` leaves, literals) — the same bytes
-//! `compile-triton`'s stdin protocol already parses into [`Node`].
+//! `tool-compile-triton`'s stdin protocol already parses into [`Node`].
 //! [`KernelTerm`] keeps those raw bytes because the artifact slug is
 //! `kernel_<target>_<blake3(raw)[:12]>` — hashing the canonical
 //! `lib_kernel_ir.to_json` output is what makes a Rust-materialized
@@ -105,7 +105,7 @@ pub fn artifact_name(target: &str, raw_term_json: &str, ext: &str) -> ArtifactRe
 
 /// Shared lowering dispatch: qgemv fragment first, then the ADR-0171
 /// elementwise/layout fragment; both refusals named on failure.
-/// Used by the `compile-triton` CLI and [`TritonEmitter`].
+/// Used by the `tool-compile-triton` CLI and [`TritonEmitter`].
 pub fn compile(node: &Node, block_n: usize, block_k: usize) -> Result<String, String> {
     match as_qgemv(node) {
         Ok(q) => Ok(emit(&q, block_n, block_k)),

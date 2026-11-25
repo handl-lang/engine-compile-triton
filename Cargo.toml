@@ -1,5 +1,5 @@
 [package]
-name = "compile-triton"
+name = "tool-compile-triton"
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.85"
@@ -13,11 +13,11 @@ categories = ["compilers", "science"]
 publish = false
 
 [lib]
-name = "compile_triton"
+name = "tool_compile_triton"
 path = "src/lib.rs"
 
 [[bin]]
-name = "compile-triton"
+name = "tool-compile-triton"
 path = "src/main.rs"
 
 [dependencies]

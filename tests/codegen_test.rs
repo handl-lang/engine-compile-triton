@@ -1,5 +1,5 @@
-use compile_triton::term::Node;
-use compile_triton::{as_qgemv, emit};
+use tool_compile_triton::term::Node;
+use tool_compile_triton::{as_qgemv, emit};
 
 fn term(k: i64, split: i64, group: i64) -> String {
     term_with_depth(k, split, group, 1)
@@ -205,8 +205,8 @@ fn emitted_source_parses_as_python() {
 
 // -- ADR-0171: elementwise/layout fragment ----------------------------------
 
-use compile_triton::term::{Expr, Lit, View};
-use compile_triton::{as_elementwise, emit_elementwise};
+use tool_compile_triton::term::{Expr, Lit, View};
+use tool_compile_triton::{as_elementwise, emit_elementwise};
 
 fn leaf(name: &str) -> String {
     format!(r#"{{"leaf":{{"name":"{name}"}}}}"#)

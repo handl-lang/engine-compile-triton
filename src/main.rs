@@ -4,8 +4,8 @@
 
 use std::io::Read;
 
-use compile_triton::compile;
-use compile_triton::term::Node;
+use tool_compile_triton::compile;
+use tool_compile_triton::term::Node;
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args().skip(1);
